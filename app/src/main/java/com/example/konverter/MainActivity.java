@@ -23,13 +23,15 @@ import androidx.core.content.ContextCompat;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.Charset;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -40,6 +42,7 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String[] CHARSETS = {"UTF-8", "windows-1251", "KOI8-R"};
     private String detectedCharset = "UTF-8";
+    private static final String FOLDER_NAME = "konverter";
 
     // ActivityResultLauncher для выбора файла
     private final ActivityResultLauncher<String[]> openFileLauncher = registerForActivityResult(
@@ -50,16 +53,7 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
 
-    // ActivityResultLauncher для создания файла
-    private final ActivityResultLauncher<String> createFileLauncher = registerForActivityResult(
-            new ActivityResultContracts.CreateDocument("text/plain"),
-            uri -> {
-                if (uri != null) {
-                    saveFile(uri);
-                }
-            });
-
-    // Launcher для запроса разрешений
+    // Launcher для запроса разрешений (только для Android 6-10)
     private final ActivityResultLauncher<String[]> requestPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> {
                 boolean allGranted = true;
@@ -84,6 +78,9 @@ public class MainActivity extends AppCompatActivity {
 
         initViews();
         setupListeners();
+
+        // Создаем папку konverter в папке приложения
+        createKonverterFolder();
     }
 
     private void initViews() {
@@ -106,38 +103,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void openFileWithPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ - используем специальное разрешение
-            if (!Environment.isExternalStorageManager()) {
-                showManageStorageDialog();
-                return;
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ не требует разрешений для OpenDocument
+            openFileLauncher.launch(new String[]{"*/*"});
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            // Android 6-10
+            // Android 6-12: проверяем разрешение на чтение
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
                     != PackageManager.PERMISSION_GRANTED) {
                 requestPermissionLauncher.launch(new String[]{
                         Manifest.permission.READ_EXTERNAL_STORAGE
                 });
                 return;
+            } else {
+                openFileLauncher.launch(new String[]{"*/*"});
             }
+        } else {
+            // Android 5 и ниже
+            openFileLauncher.launch(new String[]{"*/*"});
         }
-
-        // Если разрешения уже есть
-        openFileLauncher.launch(new String[]{"*/*"});
-    }
-
-    private void showManageStorageDialog() {
-        new AlertDialog.Builder(this)
-                .setTitle("Требуется разрешение")
-                .setMessage("Для доступа к файлам необходимо предоставить разрешение на управление хранилищем")
-                .setPositiveButton("Настройки", (dialog, which) -> {
-                    Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-                    intent.setData(Uri.parse("package:" + getPackageName()));
-                    startActivity(intent);
-                })
-                .setNegativeButton("Отмена", null)
-                .show();
     }
 
     private void openFile(Uri uri) {
@@ -146,26 +129,16 @@ public class MainActivity extends AppCompatActivity {
             String charset = detectCharset(uri);
             detectedCharset = charset;
 
-            // Если выбран режим "Авто", отмечаем соответствующую кодировку
-            if (radioSourceAuto.isChecked()) {
-                // Просто сохраняем detectedCharset для использования при конвертации
-            } else {
-                // Определяем выбранную кодировку
-                int selectedId = radioGroupSource.getCheckedRadioButtonId();
-                if (selectedId == R.id.radioSourceUTF8) {
-                    charset = "UTF-8";
-                } else if (selectedId == R.id.radioSourceWindows1251) {
-                    charset = "windows-1251";
-                } else if (selectedId == R.id.radioSourceKOI8) {
-                    charset = "KOI8-R";
-                }
-            }
-
             // Читаем файл
             String content = readFileFromUri(uri, charset);
             editInput.setText(content);
 
-            Toast.makeText(this, "Файл открыт. Определена кодировка: " + detectedCharset, Toast.LENGTH_LONG).show();
+            // Если выбран режим "Авто", показываем определенную кодировку
+            if (radioSourceAuto.isChecked()) {
+                Toast.makeText(this, "Файл открыт. Определена кодировка: " + detectedCharset, Toast.LENGTH_LONG).show();
+            } else {
+                Toast.makeText(this, "Файл открыт", Toast.LENGTH_SHORT).show();
+            }
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -174,9 +147,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String detectCharset(Uri uri) throws IOException {
-        // Пробуем разные кодировки и выбираем ту, которая дает наименьшее количество "мусора"
+        // Пробуем разные кодировки и выбираем ту, которая дает наибольшее количество русских букв
         String[] charsetsToTry = {"UTF-8", "windows-1251", "KOI8-R"};
-        String bestContent = null;
         String bestCharset = "UTF-8";
         int maxRussianLetters = 0;
 
@@ -187,7 +159,6 @@ public class MainActivity extends AppCompatActivity {
 
                 if (russianLetterCount > maxRussianLetters) {
                     maxRussianLetters = russianLetterCount;
-                    bestContent = content;
                     bestCharset = charset;
                 }
             } catch (Exception e) {
@@ -250,18 +221,7 @@ public class MainActivity extends AppCompatActivity {
             }
 
             // Определяем целевую кодировку
-            String targetCharset;
-            int targetId = radioGroupTarget.getCheckedRadioButtonId();
-
-            if (targetId == R.id.radioTargetUTF8) {
-                targetCharset = "UTF-8";
-            } else if (targetId == R.id.radioTargetWindows1251) {
-                targetCharset = "windows-1251";
-            } else if (targetId == R.id.radioTargetKOI8) {
-                targetCharset = "KOI8-R";
-            } else {
-                targetCharset = "UTF-8";
-            }
+            String targetCharset = getTargetCharset();
 
             // Конвертируем
             String convertedText = convertText(inputText, sourceCharset, targetCharset);
@@ -286,6 +246,19 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private String getTargetCharset() {
+        int targetId = radioGroupTarget.getCheckedRadioButtonId();
+        if (targetId == R.id.radioTargetUTF8) {
+            return "UTF-8";
+        } else if (targetId == R.id.radioTargetWindows1251) {
+            return "windows-1251";
+        } else if (targetId == R.id.radioTargetKOI8) {
+            return "KOI8-R";
+        } else {
+            return "UTF-8";
+        }
+    }
+
     private void saveToFile() {
         String outputText = editOutput.getText().toString();
 
@@ -294,43 +267,73 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // Запрашиваем имя файла
-        createFileLauncher.launch("converted_text.txt");
+        // Сохраняем файл в папку konverter (не требует разрешений)
+        saveFileToAppFolder(outputText);
     }
 
-    private void saveFile(Uri uri) {
+    private void createKonverterFolder() {
         try {
-            String outputText = editOutput.getText().toString();
+            // Получаем папку приложения (не требует разрешений)
+            File appFolder = getExternalFilesDir(null);
+            if (appFolder != null) {
+                File konverterFolder = new File(appFolder, FOLDER_NAME);
+                if (!konverterFolder.exists()) {
+                    boolean created = konverterFolder.mkdirs();
+                    if (created) {
+                        // Показываем путь при первом создании
+                        Toast.makeText(this, "Папка создана:\n" + konverterFolder.getAbsolutePath(), Toast.LENGTH_LONG).show();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 
-            if (TextUtils.isEmpty(outputText)) {
-                Toast.makeText(this, "Нет текста для сохранения", Toast.LENGTH_SHORT).show();
+    private void saveFileToAppFolder(String text) {
+        try {
+            // Определяем целевую кодировку
+            String targetCharset = getTargetCharset();
+
+            // Получаем папку приложения
+            File appFolder = getExternalFilesDir(null);
+            if (appFolder == null) {
+                Toast.makeText(this, "Ошибка доступа к хранилищу", Toast.LENGTH_SHORT).show();
                 return;
             }
 
-            // Определяем целевую кодировку для сохранения
-            String targetCharset;
-            int targetId = radioGroupTarget.getCheckedRadioButtonId();
-
-            if (targetId == R.id.radioTargetUTF8) {
-                targetCharset = "UTF-8";
-            } else if (targetId == R.id.radioTargetWindows1251) {
-                targetCharset = "windows-1251";
-            } else if (targetId == R.id.radioTargetKOI8) {
-                targetCharset = "KOI8-R";
-            } else {
-                targetCharset = "UTF-8";
+            // Создаем папку konverter (если еще не создана)
+            File konverterFolder = new File(appFolder, FOLDER_NAME);
+            if (!konverterFolder.exists()) {
+                boolean created = konverterFolder.mkdirs();
+                if (!created) {
+                    Toast.makeText(this, "Не удалось создать папку", Toast.LENGTH_SHORT).show();
+                    return;
+                }
             }
 
-            try (OutputStreamWriter writer = new OutputStreamWriter(
-                    getContentResolver().openOutputStream(uri), targetCharset)) {
-                writer.write(outputText);
+            // Генерируем имя файла с датой и временем
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault());
+            String fileName = "konverter_" + sdf.format(new Date()) + ".txt";
+
+            File outputFile = new File(konverterFolder, fileName);
+
+            // Сохраняем файл
+            try (FileOutputStream fos = new FileOutputStream(outputFile);
+                 OutputStreamWriter writer = new OutputStreamWriter(fos, Charset.forName(targetCharset))) {
+                writer.write(text);
             }
 
-            Toast.makeText(this, "Файл сохранен в кодировке: " + targetCharset, Toast.LENGTH_SHORT).show();
+            // Показываем путь к файлу
+            String filePath = outputFile.getAbsolutePath();
+            Toast.makeText(this, "Файл сохранен:\n" + filePath, Toast.LENGTH_LONG).show();
 
         } catch (IOException e) {
             e.printStackTrace();
             Toast.makeText(this, "Ошибка при сохранении файла: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            e.printStackTrace();
+            Toast.makeText(this, "Ошибка: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
 
